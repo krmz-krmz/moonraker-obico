@@ -111,6 +111,14 @@ class WebcamStreamer:
         self.close_all_mjpeg_socks()
 
         self.webcams = webcam_configs
+
+        if all(webcam.disable_video_streaming for webcam in self.webcams):
+            _logger.info('Video streaming is disabled in config. Skipping webcam streaming.')
+            normalized_webcams = []
+            self.printer_state.set_webcams(normalized_webcams, None)
+            self.server_conn.post_status_update_to_server(with_settings=True)
+            return (normalized_webcams, None)
+
         self.find_streaming_params()
         self.assign_janus_params()
         normalized_webcams = []
