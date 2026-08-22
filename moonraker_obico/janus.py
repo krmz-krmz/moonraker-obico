@@ -8,7 +8,7 @@ import socket
 
 from .utils import pi_version, to_unicode, is_port_open, wait_for_port, wait_for_port_to_close, run_in_thread
 from .ws import WebSocketClient
-from .janus_config_builder import RUNTIME_JANUS_ETC_DIR
+from .janus_config_builder import runtime_janus_etc_dir
 
 _logger = logging.getLogger('obico.janus')
 
@@ -35,7 +35,7 @@ class JanusConn:
 
         def run_janus_forever():
             try:
-                janus_cmd = '{janus_bin_path} --stun-server=stun.l.google.com:19302 --configs-folder {config_folder}'.format(janus_bin_path=janus_bin_path, config_folder=RUNTIME_JANUS_ETC_DIR)
+                janus_cmd = '{janus_bin_path} --stun-server=stun.l.google.com:19302 --configs-folder {config_folder}'.format(janus_bin_path=janus_bin_path, config_folder=runtime_janus_etc_dir(self.janus_port))
                 env = {}
                 if ld_lib_path:
                     env={'LD_LIBRARY_PATH': ld_lib_path + ':' + os.environ.get('LD_LIBRARY_PATH', '')}
@@ -95,6 +95,13 @@ class JanusConn:
             wait_for_port_to_close(JANUS_SERVER, self.janus_port)
         except Exception as e:
             pass # pid file not found
+
+        # Remove the pid file so that a graceful restart of this same instance reuses the same
+        # port instead of the module-load port search (see webcam_stream.py) treating it as taken.
+        try:
+            os.remove(self.janus_pid_file_path())
+        except Exception:
+            pass
 
     def shutdown(self):
         self.shutting_down = True

@@ -25,7 +25,19 @@ JANUS_SERVER = os.getenv('JANUS_SERVER', '127.0.0.1')
 FFMPEG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin', 'ffmpeg')
 FFMPEG = os.path.join(FFMPEG_DIR, 'run.sh')
 
-JANUS_WS_PORT = 17730   # Janus needs to use 17730 up to 17750. Hard-coded for now. may need to make it dynamic if the problem of port conflict is too much
+def _janus_pid_file_path(port):
+    return '/tmp/obico-janus-{janus_port}.pid'.format(janus_port=port)
+
+
+JANUS_WS_PORT = 17730   # Janus needs to use 17730 up to 17750, per instance.
+# Multiple moonraker-obico instances (e.g. for multiple printers) can run on the same host and
+# share the same codebase, so JANUS_WS_PORT can't be a single hard-coded value. Find a free port
+# by checking for the pid file each JanusConn instance leaves behind while it's running.
+for _ in range(100):
+    if not os.path.exists(_janus_pid_file_path(JANUS_WS_PORT)):
+        break
+    JANUS_WS_PORT += 20  # 20 is a big-enough gap for all the ports needed by 1 moonraker-obico instance
+
 JANUS_ADMIN_WS_PORT = JANUS_WS_PORT + 1
 
 STREAMING_FAILED_EVENT_TEXT = 'Follow the webcam troubleshooting guide to resolve the issue.'
@@ -429,6 +441,11 @@ class WebcamStreamer:
         # Ensure all ffmpeg processes are killed
         with open(self.ffmpeg_pid_file_path(rtc_port), 'r') as pid_file:
             subprocess.run(['kill', pid_file.read()], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        try:
+            os.remove(self.ffmpeg_pid_file_path(rtc_port))
+        except Exception:
+            pass
 
     def shutdown_subprocesses(self):
         if self.janus:
