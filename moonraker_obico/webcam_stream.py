@@ -432,6 +432,11 @@ class WebcamStreamer:
         with open(self.ffmpeg_pid_file_path(rtc_port), 'r') as pid_file:
             subprocess.run(['kill', pid_file.read()], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        try:
+            os.remove(self.ffmpeg_pid_file_path(rtc_port))
+        except Exception:
+            pass
+
     def shutdown_subprocesses(self):
         if self.janus:
             self.janus.shutdown()
