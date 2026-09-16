@@ -3,9 +3,9 @@ import requests  # type: ignore
 import logging
 import time
 import queue
+import threading
 import bson
 import json
-from collections import deque
 import backoff
 from urllib.error import URLError, HTTPError
 
@@ -19,6 +19,9 @@ from .redaction import format_http_request, redact_sensitive_data, redact_text, 
 NON_CRITICAL_UPDATE_INTERVAL_SECONDS = 30
 if DEBUG:
     NON_CRITICAL_UPDATE_INTERVAL_SECONDS = 5
+
+# Effectively "post the same event at most once per moonraker-obico restart", which is the historic behavior
+NEVER_REPEAT_SECONDS = 60 * 60 * 24 * 1000
 
 _logger = logging.getLogger('obico.server_conn')
 
@@ -34,7 +37,8 @@ class ServerConn:
         self.status_posted_to_server_ts = 0
         self.ss = None
         self.message_queue_to_server = queue.Queue(maxsize=50)
-        self.printer_events_posted = deque(maxlen=20)
+        self.printer_events_posted = {}  # event_title -> the timestamp it was last posted to the server
+        self.printer_events_posted_lock = threading.RLock()
 
 
     ## WebSocket part of the server connection
@@ -113,16 +117,18 @@ class ServerConn:
         return resp.json()['printer']
 
 
-    def post_printer_event_to_server(self, event_title, event_text, event_type='PRINTER_ERROR', event_class='ERROR', attach_snapshot=False, **kwargs):
+    def post_printer_event_to_server(self, event_title, event_text, event_type='PRINTER_ERROR', event_class='ERROR', attach_snapshot=False, spam_tolerance_seconds=NEVER_REPEAT_SECONDS, **kwargs):
         event_data = dict(event_title=event_title, event_text=event_text, event_type=event_type, event_class=event_class, **kwargs)
         self.send_ws_msg_to_server({'passthru': {'printer_event': event_data}})
 
-        # We dont' want to bombard the server with repeated events. So we keep track of the events sent since last restart.
-        # However, there are probably situations in the future repeated events do need to be propagated to the server.
-        if event_title in self.printer_events_posted:
-            return
+        # We dont' want to bombard the server with repeated events. So the same event title is posted at most
+        # once every spam_tolerance_seconds. The server does no de-duplication of its own.
+        with self.printer_events_posted_lock:
+            last_posted_at = self.printer_events_posted.get(event_title, 0)
+            if time.time() < last_posted_at + spam_tolerance_seconds:
+                return
 
-        self.printer_events_posted.append(event_title)
+            self.printer_events_posted[event_title] = time.time()
 
         files = None
         if attach_snapshot:
@@ -132,6 +138,20 @@ class ServerConn:
                 _logger.warn('Failed to capture jpeg - ' + redact_text(e))
                 pass
         resp = self.send_http_request('POST', '/api/v1/octo/printer_events/', timeout=60, raise_exception=True, files=files, data=event_data)
+
+    def post_filament_event_to_server(self, event_title, event_text, spam_tolerance_seconds):
+        # 'FILAMENT_CHANGE' is the only filament-related event_type the Obico server knows about, and it covers
+        # filament run-out as well. Any other event_type is silently dropped on the server's notification path.
+        # 'notify' must be truthy or the server records the event without notifying the user.
+        self.post_printer_event_to_server(
+            event_title,
+            event_text,
+            event_type='FILAMENT_CHANGE',
+            event_class='WARNING',
+            attach_snapshot=True,
+            spam_tolerance_seconds=spam_tolerance_seconds,
+            notify='true',
+        )
 
     def post_pic_to_server(self, webcam_config, viewing_boost=False):
         if not webcam_config:

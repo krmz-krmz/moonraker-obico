@@ -3,6 +3,7 @@ from typing import Optional, Dict, List, Tuple
 from numbers import Number
 import argparse
 import dataclasses
+import html
 import time
 import logging
 import threading
@@ -37,6 +38,13 @@ _default_int_handler = None
 _default_term_handler = None
 
 ACKREF_EXPIRE_SECS = 300
+
+FILAMENT_RUNOUT_EVENT_TITLE = 'Filament Runout Detected'
+FILAMENT_CHANGE_EVENT_TITLE = 'Filament Change Required'
+
+# Klipper responds with "// action:paused" on every PAUSE - user-initiated and moonraker-timelapse ones
+# included - so, unlike octoprint-obico, we can't treat it as a filament change.
+FILAMENT_CHANGE_GCODE_RESPONSES = ('m600', 'paused for user')
 
 
 class App(object):
@@ -256,6 +264,7 @@ class App(object):
 
             elif event.data.get('method', '') == 'notify_gcode_response':
                 msg = (event.data.get('params') or [''])[0]
+                self._check_filament_change_gcode_response(msg)
                 if msg.startswith('!!'):  # It seems to an undocumented feature that some gcode errors that are critical for the users to know are received as notify_gcode_response with "!!"
                     self.server_conn.post_printer_event_to_server('Moonraker Error', msg, attach_snapshot=True)
                     self.server_conn.send_ws_msg_to_server({'passthru': {'terminal_feed': {'msg': msg,'_ts': time.time()}}})
@@ -287,6 +296,7 @@ class App(object):
                 return None
 
         printer_state.set_current_print_ts(find_current_print_ts())
+        printer_state.clear_filament_runout_reported()
 
         filename = printer_state.status.get('print_stats', {}).get('filename')
         file_metadata = self.moonrakerconn.api_get('server/files/metadata', raise_for_status=True, filename=filename)
@@ -297,6 +307,7 @@ class App(object):
 
     def unset_current_print(self, printer_state):
         printer_state.set_current_print_ts(-1)
+        printer_state.clear_filament_runout_reported()
         printer_state.current_file_metadata = None
 
     def find_obico_g_code_file_id(self, cur_status, file_metadata):
@@ -338,6 +349,8 @@ class App(object):
                 )
             )
 
+        self._check_filament_sensors(prev_status)
+
         if cur_state == PrinterState.STATE_OFFLINE:
             printer_state.set_current_print_ts(None)  # Offline means actually printing status unknown. It may or may not be printing.
             self.server_conn.post_status_update_to_server()
@@ -357,6 +370,7 @@ class App(object):
                 if not printer_state.was_last_pause_timelapse():
                     self.post_print_event(PrinterState.EVENT_RESUMED)
                 printer_state.set_last_pause_was_timelapse(False)
+                printer_state.clear_filament_runout_reported()  # A run-out after the filament change is a new one
                 return
             if prev_state == PrinterState.STATE_OPERATIONAL:
                 self.set_current_print(printer_state)
@@ -396,6 +410,47 @@ class App(object):
 
         # If nothing critical has changed, it can be skipped so that it won't bombard the server unless display_status changes for faster UI update
         self.server_conn.post_status_update_to_server(is_critical=display_status_changed)
+
+    def _check_filament_sensors(self, prev_status):
+        if not self.model.config.filament_sensor.enabled:
+            return
+
+        try:
+            for sensor_name in self.model.printer_state.filament_sensors_ran_out(prev_status):
+                _logger.info(f'Filament runout detected by sensor "{sensor_name}"')
+                run_in_thread(self.post_filament_event, FILAMENT_RUNOUT_EVENT_TITLE, sensor_name)
+        except Exception:
+            self.sentry.captureException()
+
+    def _check_filament_change_gcode_response(self, msg):
+        if not self.model.config.filament_sensor.enabled:
+            return
+
+        msg_lower = (msg or '').lower()
+        if not any(pattern in msg_lower for pattern in FILAMENT_CHANGE_GCODE_RESPONSES):
+            return
+
+        _logger.info('Filament change detected in gcode response: {}'.format(msg))
+        run_in_thread(self.post_filament_event, FILAMENT_CHANGE_EVENT_TITLE)
+
+    def post_filament_event(self, event_title, sensor_name=None):
+        # The server renders event_text as HTML, hence the markup and the escaping.
+        try:
+            filepath = self.model.printer_state.status.get('print_stats', {}).get('filename')
+            details = [
+                ('Printer', self.model.linked_printer.get('name') or 'Unknown printer'),
+                ('G-Code', pathlib.Path(filepath).name if filepath else 'Unknown G-Code or not printing'),
+            ]
+            if sensor_name:
+                details.append(('Sensor', sensor_name))
+
+            event_text = ''.join(
+                '<div><i>{}:</i> {}</div>'.format(label, html.escape(str(value))) for label, value in details
+            )
+            self.server_conn.post_filament_event_to_server(
+                event_title, event_text, self.model.config.filament_sensor.notify_interval)
+        except Exception:
+            self.sentry.captureException()
 
     def process_server_msg(self, msg):
         if 'remote_status' in msg:

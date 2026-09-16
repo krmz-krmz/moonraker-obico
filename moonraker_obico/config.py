@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Optional
+from typing import List, Optional
 import re
 from functools import reduce
 from operator import concat
@@ -202,6 +202,23 @@ class LoggingConfig:
     log_network: bool = False
 
 
+@dataclasses.dataclass
+class FilamentSensorConfig:
+    # Minimum seconds between two posts of the same filament event. Duplicates during a pause are already
+    # handled by PrinterState.filament_sensors_ran_out(). This window is for the case where the print keeps
+    # going after the run-out (e.g. runout_gcode that consumes the filament left between the sensor and the
+    # nozzle before pausing): a retraction can then pull the filament tail back through the sensor, flipping it
+    # while the print is still 'printing', and that must not be reported as a second run-out.
+    DEFAULT_NOTIFY_INTERVAL = 5
+
+    enabled: bool = True
+    notify_interval: int = DEFAULT_NOTIFY_INTERVAL
+    sensor_names: List[str] = dataclasses.field(default_factory=list)  # Empty -> all sensors found in Klipper
+
+    def is_monitored(self, sensor_name):
+        return not self.sensor_names or sensor_name in self.sensor_names
+
+
 class Config:
 
     def __init__(self, config_path: str):
@@ -298,6 +315,23 @@ class Config:
                 fallback=False
             ),
 		)
+
+        self.filament_sensor = FilamentSensorConfig(
+            enabled=config.getboolean(
+                'filament_sensor', 'enabled',
+                fallback=True
+            ),
+            notify_interval=config.getint(
+                'filament_sensor', 'notify_interval',
+                fallback=FilamentSensorConfig.DEFAULT_NOTIFY_INTERVAL
+            ),
+            sensor_names=[
+                name.strip() for name in config.get(
+                    'filament_sensor', 'sensors',
+                    fallback=''
+                ).split(',') if name.strip()
+            ],
+        )
 
         self.sentry_opt = config.get(
             'misc', 'sentry_opt',

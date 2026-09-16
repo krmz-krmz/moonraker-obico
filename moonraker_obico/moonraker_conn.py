@@ -16,6 +16,7 @@ from collections import OrderedDict
 import subprocess
 import os
 
+from .printer import FILAMENT_SENSOR_PREFIXES, filament_sensor_name
 from .utils import DEBUG, run_in_thread
 from .ws import WebSocketClient, WebSocketConnectionException
 from .version import VERSION
@@ -183,6 +184,12 @@ class MoonrakerConn:
         data = self.api_get('server/history/list', raise_for_status=True, order='desc', limit=1)
         return (data.get('jobs', [None]) or [None])[0]
 
+    def all_filament_sensors(self):
+        return [
+            obj for obj in self.available_printer_objects
+            if obj.startswith(FILAMENT_SENSOR_PREFIXES) and not filament_sensor_name(obj).startswith('_')
+        ]
+
     def macro_is_configured(self, macro_name):
         return any(f'gcode_macro {macro_name.lower()}' in item.lower() for item in self.available_printer_objects)
 
@@ -336,6 +343,9 @@ class MoonrakerConn:
             key: value for key, value in subscribe_objects.items() if key in available_printer_objects
         }
 
+        for sensor in self.all_filament_sensors():
+            subscribed_objects[sensor] = ('enabled', 'filament_detected')
+
         _logger.debug(f'Subscribing to objects {subscribed_objects}')
         self.jsonrpc_request('printer.objects.subscribe', params=dict(objects=subscribed_objects))
 
@@ -365,6 +375,9 @@ class MoonrakerConn:
 
             for heater in (self.app_config.all_mr_heaters()):
                 objects[heater] = None
+
+            for sensor in self.all_filament_sensors():
+                objects[sensor] = None
 
         self.jsonrpc_request(
             'printer.objects.query',

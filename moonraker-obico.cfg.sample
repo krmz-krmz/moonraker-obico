@@ -33,3 +33,16 @@ level = INFO
 # dest_host = 127.0.0.1
 # dest_port = 80
 # dest_is_ssl = False
+
+[filament_sensor]
+# Notify when a Klipper filament sensor runs out of filament, or when the printer asks for
+# a filament change (M600). Sensors are auto-detected from Klipper.
+# enabled = True
+#
+# Minimum seconds between two reports of the same filament event. Keeps a run-out from being
+# reported twice when the print keeps going after the sensor trips (e.g. runout_gcode that uses up
+# the filament left in the extruder before pausing) and a retraction flips the sensor again.
+# notify_interval = 5
+#
+# Comma-separated sensor names to watch. Leave empty to watch all detected sensors.
+# sensors = runout_sensor, motion_sensor

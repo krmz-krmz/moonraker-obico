@@ -1,12 +1,21 @@
 import math
 import platform
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import threading
 import time
 import pathlib
 
 from .config import Config
 from .version import VERSION
+
+# Klipper printer objects that report "filament_detected" and "enabled" in their status
+FILAMENT_SENSOR_PREFIXES = ('filament_switch_sensor ', 'filament_motion_sensor ')
+
+
+def filament_sensor_name(mr_object_name):
+    '''"filament_switch_sensor runout" -> "runout"'''
+    return mr_object_name.split(' ', 1)[-1]
+
 
 class PrinterState:
     STATE_OFFLINE = 'Offline'
@@ -40,6 +49,7 @@ class PrinterState:
         self.webcams = None
         self.data_channel_id = None
         self._last_pause_was_timelapse = False  # Track if last pause was from timelapse
+        self._filament_runout_reported = False  # Track if a runout has been reported since the print (re)started
 
     def has_active_job(self) -> bool:
         return PrinterState.get_state_from_status(self.status) in PrinterState.ACTIVE_STATES
@@ -96,6 +106,53 @@ class PrinterState:
     def get_obico_g_code_file_id(self):
         with self._mutex:
             return self.obico_g_code_file_id
+
+    def clear_filament_runout_reported(self):
+        with self._mutex:
+            self._filament_runout_reported = False
+
+    def filament_sensors_ran_out(self, prev_status: Dict) -> List[str]:
+        '''
+        Compare the current status against prev_status and return the names of the monitored sensors that
+        just went from "filament detected" to "run out". Only the first run-out is returned until the print
+        is resumed, or until filament is loaded back while the print is NOT paused.
+
+        Sensors are considered while there is an active job. Klipper pauses the print on run-out, so
+        checking for "printing" alone would miss most of them. While paused, however, the pause macro
+        typically retracts the filament tail back through the sensor, which flips it a few times. Those
+        flips must not be reported as new run-outs.
+        '''
+        with self._mutex:
+            if not self.has_active_job():
+                return []
+
+            prev_status = prev_status or {}
+            is_paused = self.status.get('print_stats', {}).get('state') == 'paused'
+            ran_out = []
+
+            for mr_object_name, sensor in self.status.items():
+                if not mr_object_name.startswith(FILAMENT_SENSOR_PREFIXES) or not isinstance(sensor, dict):
+                    continue
+
+                sensor_name = filament_sensor_name(mr_object_name)
+                if not sensor.get('enabled', True) or not self.app_config.filament_sensor.is_monitored(sensor_name):
+                    continue
+
+                was_detected = (prev_status.get(mr_object_name) or {}).get('filament_detected')
+                is_detected = sensor.get('filament_detected')
+
+                if was_detected is True and is_detected is False:
+                    ran_out.append(sensor_name)
+                elif was_detected is False and is_detected is True and not is_paused:
+                    # Filament re-loaded mid-print (e.g. pause_on_runout: False). A retraction pulling the tail back
+                    # through the sensor also ends up here - FilamentSensorConfig.notify_interval covers that case.
+                    self._filament_runout_reported = False
+
+            if not ran_out or self._filament_runout_reported:
+                return []
+
+            self._filament_runout_reported = True
+            return ran_out
 
     def set_webcams(self, webcams, data_channel_id):
         with self._mutex:
